@@ -79,6 +79,8 @@ class CameraScreenState extends State<CameraScreen>
           }
         });
 
+    // Remove the call to _connectToWebSocket() since we're using one-time connections
+
     // Rotate through scanning tips
     _tipTimer = Timer.periodic(const Duration(seconds: 4), (timer) {
       if (mounted) {
@@ -159,8 +161,10 @@ class CameraScreenState extends State<CameraScreen>
     });
 
     try {
-      // Use the WebSocket method to send base64 image
-      final result = await _apiService.sendImageViaWebSocket(_imagePath!);
+      // Change this line to use the one-time WebSocket connection instead
+      final result = await _apiService.sendImageViaOneTimeWebSocket(
+        _imagePath!,
+      );
 
       setState(() {
         _isSending = false;
@@ -185,13 +189,6 @@ class CameraScreenState extends State<CameraScreen>
         _isError = true;
       });
       debugPrint('WebSocket error: $e');
-    } finally {
-      // Close the WebSocket connection when done
-      try {
-        await _apiService.disconnectFromWebSocket();
-      } catch (e) {
-        debugPrint('Error disconnecting WebSocket: $e');
-      }
     }
   }
 
