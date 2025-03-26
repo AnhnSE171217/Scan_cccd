@@ -40,6 +40,21 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
 
+  # Đăng nhập Google
+  google_sign_in: ^5.4.0
+
+  # Chọn file từ thiết bị
+  file_picker: 9.2.1
+
+
+  # Google APIs (Drive API)
+  googleapis: ^11.0.0
+
+  # Thư viện HTTP (cần cho googleapis)
+  http: ^0.13.4
+  http_parser: ^4.0.0
+
+  
 dev_dependencies:
   flutter_test:
     sdk: flutter

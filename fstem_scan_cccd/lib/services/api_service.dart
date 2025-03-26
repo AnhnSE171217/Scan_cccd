@@ -1,5 +1,8 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:async';
+import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 import 'package:logger/logger.dart';
 
 class ApiService {
@@ -295,5 +298,44 @@ class ApiService {
   // Call this method when the app is being disposed
   void dispose() {
     disconnectFromWebSocket();
+  }
+
+  /// Hàm gửi file Excel (.xlsx) từ ứng dụng Flutter đến backend server.
+  /// Server sẽ xử lý upload và chuyển đổi file Excel sang Google Sheets.
+  /// Nếu bạn đang test trên Android emulator và server chạy trên máy tính,
+  /// sử dụng '10.0.2.2' để trỏ tới localhost.
+  Future<Map<String, dynamic>> uploadExcelFile(String filePath) async {
+    // Địa chỉ backend server; điều chỉnh nếu cần (ví dụ: dùng IP cụ thể hoặc domain)
+    final String baseUrl = 'http://10.0.2.2:3000';
+    final Uri uri = Uri.parse('$baseUrl/upload');
+
+    // Tạo MultipartRequest với method POST để gửi file dạng multipart/form-data
+    final http.MultipartRequest request = http.MultipartRequest('POST', uri);
+
+    // Thêm file Excel vào request với field name 'file'
+    // Đảm bảo contentType phù hợp với định dạng file Excel (.xlsx)
+    request.files.add(
+      await http.MultipartFile.fromPath(
+        'file',
+        filePath,
+        contentType: MediaType(
+          'application',
+          'vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        ),
+      ),
+    );
+
+    // Gửi request và nhận phản hồi từ server
+    final http.StreamedResponse streamedResponse = await request.send();
+    final http.Response response = await http.Response.fromStream(
+      streamedResponse,
+    );
+
+    if (response.statusCode == 200) {
+      // Nếu upload thành công, parse JSON trả về từ server
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    } else {
+      throw Exception('Upload failed with status code: ${response.statusCode}');
+    }
   }
 }
