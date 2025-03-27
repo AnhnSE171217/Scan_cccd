@@ -11,54 +11,56 @@ class UploadExcelScreen extends StatefulWidget {
 }
 
 class _UploadExcelScreenState extends State<UploadExcelScreen> {
-  String _sheetUrl = '';
+  // Biến này dùng để hiển thị thông báo kết quả WebSocket (thay cho _sheetUrl ban đầu)
+  String _wsMessage = '';
 
   // Tạo một instance của ApiService
   final ApiService _apiService = ApiService();
 
-  Future<void> _pickAndUploadFile() async {
+  Future<void> _pickAndSendFileViaWebSocket() async {
     // Mở hộp thoại chọn file Excel (.xlsx)
     FilePickerResult? result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['xlsx'],
     );
-    if (result == null) return; // Người dùng hủy chọn file
 
+    if (result == null) return; // Người dùng hủy chọn file
     final filePath = result.files.single.path;
     if (filePath == null) return;
 
     try {
-      // Gọi hàm uploadExcelFile thông qua instance _apiService
-      final responseBody = await _apiService.uploadExcelFile(filePath);
+      // Gọi hàm sendExcelViaWebSocket
+      final message = await _apiService.sendExcelViaWebSocket(filePath);
+
+      // Cập nhật UI để hiển thị thông báo
       setState(() {
-        // Cập nhật _sheetUrl với giá trị trả về từ server
-        _sheetUrl = responseBody['webViewLink'] ?? 'Không lấy được link';
+        _wsMessage = message;
       });
     } catch (e) {
-      print('Lỗi khi upload file: $e');
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Lỗi khi upload file: $e')));
+      debugPrint('Lỗi khi gửi file Excel qua WebSocket: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Lỗi khi gửi file Excel qua WebSocket: $e')),
+      );
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Upload Excel -> Google Sheets')),
+      appBar: AppBar(title: const Text('Gửi Excel qua WebSocket')),
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             ElevatedButton(
-              onPressed: _pickAndUploadFile,
-              child: const Text('Chọn file Excel và chuyển đổi'),
+              onPressed: _pickAndSendFileViaWebSocket,
+              child: const Text('Chọn file Excel và gửi qua WS'),
             ),
             const SizedBox(height: 20),
-            if (_sheetUrl.isNotEmpty) ...[
-              const Text('Đường dẫn Google Sheets:'),
+            if (_wsMessage.isNotEmpty) ...[
+              const Text('Trạng thái WebSocket:'),
               const SizedBox(height: 8),
-              SelectableText(_sheetUrl),
+              SelectableText(_wsMessage),
             ],
           ],
         ),
