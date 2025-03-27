@@ -9,7 +9,12 @@ import 'dart:async';
 class CameraScreen extends StatefulWidget {
   final CameraDescription camera;
 
-  const CameraScreen({super.key, required this.camera});
+  final String eventName;
+  const CameraScreen({
+    super.key,
+    required this.camera,
+    required this.eventName,
+  });
 
   @override
   CameraScreenState createState() => CameraScreenState();
@@ -162,8 +167,9 @@ class CameraScreenState extends State<CameraScreen>
 
     try {
       // Change this line to use the one-time WebSocket connection instead
-      final result = await _apiService.sendImageViaOneTimeWebSocket(
+      final result = await _apiService.sendImageAndEventViaWebSocket(
         _imagePath!,
+        widget.eventName,
       );
 
       setState(() {

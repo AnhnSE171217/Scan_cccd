@@ -326,6 +326,43 @@ class ApiService {
     }
   }
 
+  Future<List<Map<String, dynamic>>> fetchEventsFromApi() async {
+    final response = await http.get(
+      Uri.parse('http://10.0.2.2:8080/api/events'),
+    ); // sửa URL nếu cần
+
+    if (response.statusCode == 200) {
+      final List<dynamic> data = jsonDecode(response.body);
+      return data.cast<Map<String, dynamic>>();
+    } else {
+      throw Exception('Lấy danh sách sự kiện thất bại!');
+    }
+  }
+
+  Future<String> sendImageAndEventViaWebSocket(
+    String imagePath,
+    String eventName,
+  ) async {
+    try {
+      if (!_connectionActive) {
+        await connectToWebSocket();
+      }
+
+      final imageBytes = await _readImageFile(imagePath);
+      final base64Image = base64Encode(imageBytes);
+
+      final payload = {'event': eventName, 'image': base64Image};
+
+      final jsonPayload = jsonEncode(payload);
+      _socket!.add(jsonPayload);
+
+      return 'Đã gửi ảnh kèm event "$eventName" qua WebSocket';
+    } catch (e) {
+      logger.e('Lỗi khi gửi dữ liệu: $e');
+      throw Exception('Gửi thất bại: $e');
+    }
+  }
+
   // Gọi hàm này khi app dispose
   void dispose() {
     disconnectFromWebSocket();
