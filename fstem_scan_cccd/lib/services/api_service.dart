@@ -328,14 +328,24 @@ class ApiService {
 
   Future<List<Map<String, dynamic>>> fetchEventsFromApi() async {
     final response = await http.get(
-      Uri.parse('http://10.0.2.2:8080/api/events'),
+      Uri.parse('https://scancccd.onrender.com/api/v1/event/'),
     ); // sửa URL nếu cần
 
     if (response.statusCode == 200) {
-      final List<dynamic> data = jsonDecode(response.body);
-      return data.cast<Map<String, dynamic>>();
+      logger.i('Response body: ${response.body}');
+      if (response.body.trim().isEmpty) {
+        throw Exception('Phản hồi từ API rỗng (empty body)');
+      }
+      try {
+        final List<dynamic> data = jsonDecode(response.body);
+        return data.cast<Map<String, dynamic>>();
+      } catch (e) {
+        throw Exception('Lỗi khi parse JSON từ API: $e');
+      }
     } else {
-      throw Exception('Lấy danh sách sự kiện thất bại!');
+      throw Exception(
+        'Lỗi khi gọi API: ${response.statusCode} - ${response.reasonPhrase}',
+      );
     }
   }
 
