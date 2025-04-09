@@ -3,13 +3,13 @@ import 'package:camera/camera.dart';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart' as path_provider;
 import '../services/api_service.dart';
-import 'dart:ui';
 import 'dart:async';
+import 'package:logger/logger.dart';
 
 class CameraScreen extends StatefulWidget {
   final CameraDescription camera;
-
   final String eventName;
+
   const CameraScreen({
     super.key,
     required this.camera,
@@ -17,813 +17,488 @@ class CameraScreen extends StatefulWidget {
   });
 
   @override
-  CameraScreenState createState() => CameraScreenState();
+  State<CameraScreen> createState() => CameraScreenState();
 }
 
 class CameraScreenState extends State<CameraScreen>
-    with SingleTickerProviderStateMixin {
-  late CameraController _controller;
-  late Future<void> _initializeControllerFuture;
+    with WidgetsBindingObserver {
+  CameraController? _controller;
+  bool _isCameraInitialized = false;
+  bool _isCameraError = false;
+  String _errorMessage = '';
   String? _imagePath;
   bool _isSending = false;
-  String _statusMessage = '';
-  bool _isError = false;
   final ApiService _apiService = ApiService();
-
-  // Initialize controller without using 'late' or null
-  late AnimationController _animationController;
-  late Animation<double> _scaleAnimation;
-  bool _showControls = true;
-  bool _flashEnabled = false;
-  final List<String> _scanTips = [
-    'Place ID card within the frame',
-    'Ensure good lighting',
-    'Hold camera steady for best results',
-    'Make sure the photo is clearly visible',
-  ];
-  int _currentTipIndex = 0;
-  Timer? _tipTimer;
+  final Logger logger = Logger(
+    printer: PrettyPrinter(
+      methodCount: 0,
+      errorMethodCount: 5,
+      lineLength: 80,
+      colors: true,
+      printEmojis: false,
+      printTime: false,
+    ),
+  );
 
   @override
   void initState() {
     super.initState();
-    // Initialize camera controller with high resolution for better document scanning
-    _controller = CameraController(
-      widget.camera,
-      ResolutionPreset.high,
-      enableAudio: false,
-      imageFormatGroup: ImageFormatGroup.jpeg,
-    );
+    WidgetsBinding.instance.addObserver(this);
+    _initializeCamera();
+  }
 
-    // Initialize animation controller first
-    _animationController = AnimationController(
-      duration: const Duration(milliseconds: 300),
-      vsync: this,
-    );
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // App state changed before we got the chance to initialize the camera
+    if (_controller == null || !_controller!.value.isInitialized) return;
 
-    // Initialize animation after controller is created
-    _scaleAnimation = Tween<double>(begin: 1.0, end: 0.9).animate(
-      CurvedAnimation(
-        parent: _animationController,
-        curve: Curves.easeInOutCubic,
-      ),
-    );
+    if (state == AppLifecycleState.inactive) {
+      _controller?.dispose();
+    } else if (state == AppLifecycleState.resumed) {
+      _initializeCamera();
+    }
+  }
 
-    // Initialize controller future - fixed to not return null
-    _initializeControllerFuture = _controller
-        .initialize()
-        .then((_) {
-          if (mounted) setState(() {});
-        })
-        .catchError((error) {
-          if (mounted) {
-            setState(() {
-              _statusMessage = 'Camera initialization failed: $error';
-              _isError = true;
-            });
-          }
-        });
+  Future<void> _initializeCamera() async {
+    try {
+      final controller = CameraController(
+        widget.camera,
+        ResolutionPreset.medium, // Use medium instead of high for stability
+        enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.jpeg,
+      );
 
-    // Remove the call to _connectToWebSocket() since we're using one-time connections
+      await controller.initialize();
 
-    // Rotate through scanning tips
-    _tipTimer = Timer.periodic(const Duration(seconds: 4), (timer) {
+      if (!mounted) return;
+
+      setState(() {
+        _controller = controller;
+        _isCameraInitialized = true;
+        _isCameraError = false;
+      });
+    } catch (e) {
       if (mounted) {
         setState(() {
-          _currentTipIndex = (_currentTipIndex + 1) % _scanTips.length;
+          _isCameraError = true;
+          _errorMessage = "Camera initialization failed: $e";
         });
       }
-    });
+      logger.e('Error initializing camera: $e');
+    }
   }
 
   @override
   void dispose() {
-    _controller.dispose();
-    _animationController.dispose();
-    _tipTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    _disposeCamera();
     super.dispose();
   }
 
-  Future<void> _takePicture() async {
+  Future<void> _disposeCamera() async {
     try {
-      // Animation for button press
-      _animationController.forward().then(
-        (_) => _animationController.reverse(),
-      );
-
-      // Ensure camera is initialized
-      await _initializeControllerFuture;
-
-      // Get directory path where image will be saved
-      final Directory appDir = await path_provider.getTemporaryDirectory();
-      final String dirPath = '${appDir.path}/Pictures';
-      await Directory(dirPath).create(recursive: true);
-
-      // Create a unique file name
-      final String filePath =
-          '$dirPath/${DateTime.now().millisecondsSinceEpoch}.jpg';
-
-      // Take the picture
-      final XFile image = await _controller.takePicture();
-      await image.saveTo(filePath);
-
-      setState(() {
-        _imagePath = filePath;
-        _statusMessage = 'Image captured successfully!';
-        _isError = false;
-        _showControls = false;
-      });
+      await _controller?.dispose();
     } catch (e) {
-      setState(() {
-        _statusMessage = 'Error capturing image: $e';
-        _isError = true;
-      });
-      debugPrint('Camera error: $e');
+      logger.e('Error disposing camera: $e');
     }
   }
 
-  void _clearImage() {
-    setState(() {
-      _imagePath = null;
-      _statusMessage = '';
-      _showControls = true;
-    });
+  Future<void> _takePicture() async {
+    if (_controller == null || !_controller!.value.isInitialized) {
+      setState(() {
+        _errorMessage = 'Camera not ready';
+      });
+      return;
+    }
+
+    try {
+      // Get directory path where image will be saved
+      final directory = await path_provider.getTemporaryDirectory();
+      final dirPath = '${directory.path}/Pictures';
+      await Directory(dirPath).create(recursive: true);
+
+      // Create a unique file name
+      final filePath = '$dirPath/${DateTime.now().millisecondsSinceEpoch}.jpg';
+
+      // Take the picture
+      final xFile = await _controller!.takePicture();
+      await xFile.saveTo(filePath);
+
+      setState(() {
+        _imagePath = filePath;
+      });
+    } catch (e) {
+      setState(() {
+        _errorMessage = 'Failed to take picture: $e';
+      });
+      logger.e('Error taking picture: $e');
+    }
   }
 
   Future<void> _sendToApi() async {
     if (_imagePath == null) {
       setState(() {
-        _statusMessage = 'No image to send!';
-        _isError = true;
+        _errorMessage = 'No image to send';
       });
       return;
     }
 
     setState(() {
       _isSending = true;
-      _statusMessage = 'Sending image to server...';
-      _isError = false;
     });
 
     try {
-      // Change this line to use the one-time WebSocket connection instead
       final result = await _apiService.sendImageAndEventViaWebSocket(
         _imagePath!,
         widget.eventName,
       );
 
+      if (!mounted) return;
+
       setState(() {
         _isSending = false;
-        _statusMessage = result;
-        _isError = false;
+        _errorMessage = '';
+        // Show success and reset after a delay
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Success: $result')));
       });
 
-      // Return to camera capture mode after a short delay to show success message
       Future.delayed(const Duration(seconds: 2), () {
         if (mounted) {
           setState(() {
-            _imagePath = null; // Clear the image path
-            _showControls = true; // Show camera controls
-            _statusMessage = ''; // Clear status message
+            _imagePath = null;
           });
         }
       });
     } catch (e) {
-      setState(() {
-        _isSending = false;
-        _statusMessage = 'Error sending image: $e';
-        _isError = true;
-      });
-      debugPrint('WebSocket error: $e');
-    }
-  }
-
-  void _toggleFlash() async {
-    try {
-      if (_flashEnabled) {
-        await _controller.setFlashMode(FlashMode.off);
-      } else {
-        await _controller.setFlashMode(FlashMode.torch);
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _errorMessage = 'Error sending image: $e';
+        });
       }
-
-      setState(() {
-        _flashEnabled = !_flashEnabled;
-      });
-    } catch (e) {
-      debugPrint('Error toggling flash: $e');
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black,
-      extendBodyBehindAppBar: true,
       appBar: AppBar(
-        backgroundColor: Colors.black.withAlpha(100),
+        backgroundColor: Colors.black.withAlpha(180),
         elevation: 0,
-        title: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        leading: Container(
+          margin: const EdgeInsets.only(left: 8),
           decoration: BoxDecoration(
             color: Colors.black.withAlpha(150),
-            borderRadius: BorderRadius.circular(20),
+            shape: BoxShape.circle,
           ),
-          child: Text(
-            'SCAN ID CARD',
-            style: TextStyle(
-              fontWeight: FontWeight.w500,
-              letterSpacing: 1.5,
-              color: Colors.white.withAlpha(255),
-              fontSize: 18,
-            ),
+          child: IconButton(
+            icon: const Icon(Icons.arrow_back, color: Colors.white),
+            onPressed: () => Navigator.of(context).pop(),
+            tooltip: 'Back to events',
           ),
         ),
-        centerTitle: true,
-        automaticallyImplyLeading: false, // Prevents automatic back button
-        actions: [
-          Container(
-            margin: const EdgeInsets.only(right: 8),
-            decoration: BoxDecoration(
-              color: Colors.black.withAlpha(150),
-              shape: BoxShape.circle,
-            ),
-            child: IconButton(
-              icon: Icon(
-                _flashEnabled ? Icons.flash_on : Icons.flash_off,
+        title: Column(
+          children: [
+            Text(
+              'SCAN ID CARD',
+              style: TextStyle(
+                fontWeight: FontWeight.w500,
+                letterSpacing: 1.5,
                 color: Colors.white,
+                fontSize: 18,
               ),
-              onPressed: _toggleFlash,
             ),
-          ),
-        ],
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+              margin: const EdgeInsets.only(top: 4),
+              decoration: BoxDecoration(
+                color: Colors.black.withAlpha(100),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.white.withAlpha(50), width: 1),
+              ),
+              child: Text(
+                'Event: ${widget.eventName}',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w400,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+          ],
+        ),
+        centerTitle: true,
       ),
-      body: Stack(
-        children: [
-          // Camera Preview
-          FutureBuilder<void>(
-            future: _initializeControllerFuture,
-            builder: (context, snapshot) {
-              if (snapshot.connectionState == ConnectionState.done) {
-                if (snapshot.hasError) {
-                  return Center(
-                    child: Text(
-                      'Camera error: ${snapshot.error}',
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                  );
-                }
+      body: Container(color: Colors.black, child: _buildBody()),
+    );
+  }
 
-                return AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 500),
-                  child:
-                      _imagePath == null
-                          ? SizedBox.expand(
-                            key: const ValueKey('camera'),
-                            child: CameraPreview(_controller),
-                          )
-                          : SizedBox.expand(
-                            key: const ValueKey('image'),
-                            child: Image.file(
-                              File(_imagePath!),
-                              fit: BoxFit.cover,
-                            ),
-                          ),
-                );
-              } else {
-                return Container(
-                  color: Colors.black,
-                  child: Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const CircularProgressIndicator(
-                          color: Colors.white,
-                          strokeWidth: 2,
-                        ),
-                        const SizedBox(height: 24),
-                        Text(
-                          'Setting up camera...',
-                          style: TextStyle(
-                            color: Colors.white.withAlpha(204),
-                            fontSize: 16,
-                            fontWeight: FontWeight.w300,
-                          ),
-                        ),
-                      ],
-                    ),
+  Widget _buildBody() {
+    // Error case
+    if (_isCameraError) {
+      return Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xFF424242), Color(0xFF212121)],
+          ),
+        ),
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(
+                Icons.error_outline,
+                color: Color(0xFFFF7043),
+                size: 64,
+              ),
+              const SizedBox(height: 24),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 32),
+                child: Text(
+                  _errorMessage,
+                  style: const TextStyle(color: Colors.white, fontSize: 16),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              const SizedBox(height: 32),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFFF7043),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 32,
+                    vertical: 16,
                   ),
-                );
-              }
-            },
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(30),
+                  ),
+                ),
+                child: const Text('Go Back', style: TextStyle(fontSize: 16)),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // Camera not initialized yet
+    if (!_isCameraInitialized) {
+      return Container(
+        color: Colors.black,
+        child: const Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(
+                valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFFF7043)),
+              ),
+              SizedBox(height: 24),
+              Text(
+                'Initializing camera...',
+                style: TextStyle(color: Colors.white70, fontSize: 16),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // Image preview mode
+    if (_imagePath != null) {
+      return Stack(
+        children: [
+          // Full screen image preview
+          Positioned.fill(
+            child: Image.file(File(_imagePath!), fit: BoxFit.contain),
           ),
 
-          // ID Card Overlay
-          if (_imagePath == null)
-            Positioned.fill(
-              child: CustomPaint(painter: IDCardOverlayPainter()),
-            ),
-
-          // Scanning Tips
-          if (_imagePath == null)
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 70,
-              left: 16,
-              right: 16,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: BackdropFilter(
-                  filter: ImageFilter.blur(sigmaX: 7, sigmaY: 7),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 12,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withAlpha(77),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color: Colors.white.withAlpha(77),
-                        width: 1,
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(Icons.info_outline, color: Colors.white, size: 18),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: AnimatedSwitcher(
-                            duration: const Duration(milliseconds: 500),
-                            child: Text(
-                              _scanTips[_currentTipIndex],
-                              key: ValueKey(_currentTipIndex),
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w400,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-
-          // Status message with blur effect
-          if (_statusMessage.isNotEmpty)
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 70,
-              left: 16,
-              right: 16,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: BackdropFilter(
-                  filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 12,
-                    ),
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors:
-                            _isError
-                                ? [
-                                  Colors.red.withAlpha(80),
-                                  Colors.redAccent.withAlpha(100),
-                                ]
-                                : [
-                                  Colors.teal.withAlpha(100),
-                                  Colors.blue.withAlpha(120),
-                                ],
-                      ),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color:
-                            _isError
-                                ? Colors.red.withAlpha(150)
-                                : Colors.cyanAccent.withAlpha(150),
-                        width: 1.5,
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withAlpha(50),
-                          blurRadius: 4,
-                          offset: const Offset(0, 2),
-                        ),
-                      ],
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          _isError
-                              ? Icons.error_outline
-                              : Icons.check_circle_outline,
-                          color: _isError ? Colors.white : Colors.white,
-                          size: 20,
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            _statusMessage,
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w500,
-                              letterSpacing: 0.3,
-                              shadows: [
-                                Shadow(
-                                  color: Colors.black.withAlpha(100),
-                                  blurRadius: 3,
-                                  offset: const Offset(0, 1),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                        if (_isError)
-                          IconButton(
-                            icon: const Icon(
-                              Icons.close,
-                              color: Colors.white,
-                              size: 16,
-                            ),
-                            onPressed: () {
-                              setState(() {
-                                _statusMessage = '';
-                              });
-                            },
-                            padding: EdgeInsets.zero,
-                            constraints: const BoxConstraints(),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-
-          // Bottom controls area with glass effect
+          // Bottom controls with gradient background
           Positioned(
             left: 0,
             right: 0,
             bottom: 0,
-            child: ClipRRect(
-              borderRadius: const BorderRadius.only(
-                topLeft: Radius.circular(30),
-                topRight: Radius.circular(30),
+            child: Container(
+              padding: const EdgeInsets.all(24.0),
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.bottomCenter,
+                  end: Alignment.topCenter,
+                  colors: [Colors.black87, Colors.transparent],
+                ),
               ),
-              child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
-                child: Container(
-                  padding: EdgeInsets.fromLTRB(
-                    24,
-                    24,
-                    24,
-                    24 + MediaQuery.of(context).padding.bottom,
-                  ),
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [
-                        Colors.black.withAlpha(26),
-                        Colors.black.withAlpha(153),
-                      ],
-                    ),
-                    borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(30),
-                      topRight: Radius.circular(30),
-                    ),
-                    border: Border.all(
-                      color: Colors.white.withAlpha(26),
-                      width: 1,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  // Retake button
+                  ElevatedButton.icon(
+                    onPressed: () => setState(() => _imagePath = null),
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Retake'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.red.shade800,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 20,
+                        vertical: 12,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(30),
+                      ),
                     ),
                   ),
-                  child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 500),
-                    switchInCurve: Curves.easeOutCubic,
-                    switchOutCurve: Curves.easeInCubic,
-                    child:
-                        _showControls
-                            ? _buildCameraControls()
-                            : _buildPreviewControls(),
+
+                  // Send button
+                  ElevatedButton.icon(
+                    onPressed: _isSending ? null : _sendToApi,
+                    icon:
+                        _isSending
+                            ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                color: Colors.white,
+                                strokeWidth: 2,
+                              ),
+                            )
+                            : const Icon(Icons.send),
+                    label: Text(_isSending ? 'Sending...' : 'Send'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFFF7043),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 24,
+                        vertical: 12,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(30),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    // Camera preview mode
+    return Stack(
+      children: [
+        // Camera preview
+        Positioned.fill(
+          child:
+              _controller!.value.isInitialized
+                  ? ClipRect(child: CameraPreview(_controller!))
+                  : Container(
+                    color: Colors.black,
+                    child: const Center(
+                      child: Text(
+                        'Preparing camera...',
+                        style: TextStyle(color: Colors.white70),
+                      ),
+                    ),
+                  ),
+        ),
+
+        // Capture button at bottom
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 30,
+          child: Center(
+            child: GestureDetector(
+              onTap: _takePicture,
+              child: Container(
+                height: 80,
+                width: 80,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: const Color(0x33FFFFFF), // This is 0.2 opacity white
+                  border: Border.all(color: Colors.white, width: 3),
+                ),
+                child: const Center(
+                  child: SizedBox(
+                    height: 60,
+                    width: 60,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.white,
+                      ),
+                    ),
                   ),
                 ),
               ),
             ),
           ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildCameraControls() {
-    return Center(
-      key: const ValueKey('camera_controls'),
-      child: GestureDetector(
-        onTap: _takePicture,
-        child: AnimatedBuilder(
-          animation: _animationController,
-          builder: (context, child) {
-            return Transform.scale(
-              scale: _scaleAnimation.value,
-              child: Container(
-                width: 80,
-                height: 80,
-                decoration: BoxDecoration(
-                  color: Colors.transparent,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: Colors.white, width: 3),
-                ),
-                child: Center(
-                  child: Container(
-                    width: 65,
-                    height: 65,
-                    decoration: const BoxDecoration(
-                      color: Colors.white,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                ),
-              ),
-            );
-          },
         ),
-      ),
-    );
-  }
 
-  Widget _buildPreviewControls() {
-    return Row(
-      key: const ValueKey('preview_controls'),
-      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-      children: [
-        // Discard button
-        GestureDetector(
-          onTap: _clearImage,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 50,
-                height: 50,
-                decoration: BoxDecoration(
-                  color: Colors.black.withAlpha(77),
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: Colors.white.withAlpha(77),
-                    width: 1,
-                  ),
-                ),
-                child: const Icon(Icons.close, color: Colors.white, size: 24),
+        // Error message if any
+        if (_errorMessage.isNotEmpty)
+          Positioned(
+            top: 16,
+            left: 16,
+            right: 16,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: const Color(0xCCFF0000), // Red with 0.8 opacity
+                borderRadius: BorderRadius.circular(8),
               ),
-              const SizedBox(height: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 4,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.black.withAlpha(180),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Text(
-                  'Retake',
-                  style: TextStyle(
-                    color: Colors.white.withAlpha(255),
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
+              child: Text(
+                _errorMessage,
+                style: const TextStyle(color: Colors.white),
+                textAlign: TextAlign.center,
               ),
-            ],
+            ),
+          ),
+
+        // Camera guide overlay
+        Positioned.fill(
+          child: IgnorePointer(
+            child: Container(
+              decoration: BoxDecoration(
+                border: Border.all(
+                  color: const Color(0x4DFFFFFF), // White with 0.3 opacity
+                  width: 1,
+                ),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              margin: const EdgeInsets.all(50),
+            ),
           ),
         ),
 
-        // Upload button
-        GestureDetector(
-          onTap: _isSending ? null : _sendToApi,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 70,
-                height: 70,
-                decoration: BoxDecoration(
-                  gradient: const LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [Color(0xFF4FACFE), Color(0xFF00F2FE)],
-                  ),
-                  shape: BoxShape.circle,
-                  boxShadow: [
-                    BoxShadow(
-                      color: const Color(0xFF4FACFE).withAlpha(128),
-                      blurRadius: 15,
-                      spreadRadius: 2,
-                    ),
-                  ],
-                ),
-                child:
-                    _isSending
-                        ? const Center(
-                          child: SizedBox(
-                            width: 24,
-                            height: 24,
-                            child: CircularProgressIndicator(
-                              color: Colors.white,
-                              strokeWidth: 2,
-                            ),
-                          ),
-                        )
-                        : const Icon(
-                          Icons.check,
-                          color: Colors.white,
-                          size: 30,
-                        ),
+        // Instruction text
+        Positioned(
+          top: 16,
+          left: 0,
+          right: 0,
+          child: Center(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: const Color(0x80000000), // Black with 0.5 opacity
+                borderRadius: BorderRadius.circular(20),
               ),
-              const SizedBox(height: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 5,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.black.withAlpha(180),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Text(
-                  _isSending ? 'Processing...' : 'Send ID Data',
-                  style: TextStyle(
-                    color: Colors.white.withAlpha(255),
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
-                  ),
+              child: const Text(
+                'Position ID card within frame',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
                 ),
               ),
-            ],
+            ),
           ),
         ),
       ],
     );
   }
-}
-
-// ID Card overlay painter specifically designed for ID cards
-class IDCardOverlayPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final Paint framePaint =
-        Paint()
-          ..color = Colors.white
-          ..strokeWidth = 2.0
-          ..style = PaintingStyle.stroke;
-
-    final Paint backgroundPaint =
-        Paint()
-          ..color = Colors.black.withAlpha(120)
-          ..style = PaintingStyle.fill;
-
-    // Calculate ID card frame dimensions (standard ID ratio is about 85.6 x 53.98 mm ~ 1.59:1)
-    final double cardWidth = size.width * 0.8;
-    final double cardHeight = cardWidth / 1.59; // Maintain ID card aspect ratio
-
-    // Calculate rectangle for ID card frame
-    final Rect cardRect = Rect.fromCenter(
-      center: Offset(size.width / 2, size.height / 2),
-      width: cardWidth,
-      height: cardHeight,
-    );
-
-    // Draw transparent rectangle inside an opaque background
-    final Path backgroundPath =
-        Path()
-          ..addRect(Rect.fromLTWH(0, 0, size.width, size.height))
-          ..addRect(cardRect);
-
-    canvas.drawPath(backgroundPath, backgroundPaint);
-
-    // Draw white frame around ID card area
-    canvas.drawRect(cardRect, framePaint);
-
-    // Draw corners for better visibility
-    final double cornerLength = cardWidth * 0.1;
-
-    // Draw corner indicators
-    _drawCorners(canvas, cardRect, cornerLength, framePaint);
-
-    // Add front-specific visual indicators
-    _drawFrontCardGuides(canvas, cardRect);
-
-    // Add text label
-    final TextPainter painter = TextPainter(
-      text: const TextSpan(
-        text: 'Front of ID Card',
-        style: TextStyle(
-          color: Colors.white,
-          fontSize: 14,
-          fontWeight: FontWeight.bold,
-          shadows: [
-            Shadow(color: Colors.black, offset: Offset(0, 0), blurRadius: 5),
-          ],
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-      textAlign: TextAlign.center,
-    );
-
-    painter.layout(maxWidth: size.width);
-
-    // Draw a background for the text
-    final backgroundRect = Rect.fromCenter(
-      center: Offset(size.width / 2, cardRect.bottom + 20 + painter.height / 2),
-      width: painter.width + 24,
-      height: painter.height + 10,
-    );
-
-    canvas.drawRect(
-      backgroundRect,
-      Paint()..color = Colors.black.withAlpha(180),
-    );
-
-    painter.paint(
-      canvas,
-      Offset((size.width - painter.width) / 2, cardRect.bottom + 20),
-    );
-  }
-
-  void _drawCorners(Canvas canvas, Rect rect, double length, Paint paint) {
-    // Top left
-    canvas.drawLine(rect.topLeft, rect.topLeft.translate(length, 0), paint);
-    canvas.drawLine(rect.topLeft, rect.topLeft.translate(0, length), paint);
-
-    // Top right
-    canvas.drawLine(rect.topRight, rect.topRight.translate(-length, 0), paint);
-    canvas.drawLine(rect.topRight, rect.topRight.translate(0, length), paint);
-
-    // Bottom left
-    canvas.drawLine(
-      rect.bottomLeft,
-      rect.bottomLeft.translate(length, 0),
-      paint,
-    );
-    canvas.drawLine(
-      rect.bottomLeft,
-      rect.bottomLeft.translate(0, -length),
-      paint,
-    );
-
-    // Bottom right
-    canvas.drawLine(
-      rect.bottomRight,
-      rect.bottomRight.translate(-length, 0),
-      paint,
-    );
-    canvas.drawLine(
-      rect.bottomRight,
-      rect.bottomRight.translate(0, -length),
-      paint,
-    );
-  }
-
-  void _drawFrontCardGuides(Canvas canvas, Rect cardRect) {
-    final Paint guidePaint =
-        Paint()
-          ..color = Colors.white.withAlpha(180)
-          ..strokeWidth = 1.0
-          ..style = PaintingStyle.stroke;
-
-    // Photo area (typically on the right side)
-    final Rect photoRect = Rect.fromLTWH(
-      cardRect.left + cardRect.width * 0.65,
-      cardRect.top + cardRect.height * 0.2,
-      cardRect.width * 0.25,
-      cardRect.height * 0.6,
-    );
-
-    canvas.drawRect(photoRect, guidePaint);
-
-    // Text lines for name, ID number, etc.
-    double lineY = cardRect.top + cardRect.height * 0.25;
-    const double lineSpacing = 18;
-
-    for (int i = 0; i < 4; i++) {
-      canvas.drawLine(
-        Offset(cardRect.left + cardRect.width * 0.1, lineY),
-        Offset(cardRect.left + cardRect.width * 0.6, lineY),
-        guidePaint,
-      );
-      lineY += lineSpacing;
-    }
-  }
-
-  @override
-  bool shouldRepaint(CustomPainter oldDelegate) => false;
 }
